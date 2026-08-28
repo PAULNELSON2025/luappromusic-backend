@@ -86,7 +86,13 @@ async def download_media(req: DownloadRequest):
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'geo_bypass': True,
         'ffmpeg_location': FFMPEG_BIN if os.path.exists(str(FFMPEG_BIN)) else None,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'tv_embedded', 'web_creator'],
+            }
+        },
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -95,6 +101,7 @@ async def download_media(req: DownloadRequest):
         },
         'extract_flat': False,
     }
+
 
     if req.format in ["mp3", "wav"]:
         # Para TikTok e Instagram, buscar cualquier stream de audio o extraer del video
