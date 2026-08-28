@@ -262,54 +262,225 @@ async def get_download_file(filepath: str):
 @app.post("/api/edit")
 async def edit_audio(
     file: UploadFile = File(...),
-    start_time: str = Form("0"),
-    end_time: Optional[str] = Form(None),
-    fade_in: bool = Form(False),
-    fade_out: bool = Form(False),
-    normalize: bool = Form(False)
+    start_time: float = Form(0.0),
+    end_time: Optional[float] = Form(None),
+    fade_in_sec: float = Form(0.0),
+    fade_out_sec: float = Form(0.0),
+    volume_gain: float = Form(0.0),
+    speed: float = Form(1.0),
+    eq_bass: float = Form(0.0),
+    eq_mid: float = Form(0.0),
+    eq_treble: float = Form(0.0),
+    normalize: bool = Form(False),
+    reverse: bool = Form(False),
+    export_format: str = Form("mp3")
 ):
+    temp_input = None
     try:
         file_ext = Path(file.filename).suffix or ".mp3"
-        temp_input = DOWNLOADS_DIR / f"temp_{uuid.uuid4().hex[:8]}{file_ext}"
-        output_filename = f"edit_{uuid.uuid4().hex[:8]}.mp3"
-        temp_output = OUTPUT_DIR / output_filename
-
+        safe_id = uuid.uuid4().hex[:8]
+        temp_input = DOWNLOADS_DIR / f"raw_{safe_id}{file_ext}"
+        
         with open(temp_input, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Construir filtros FFmpeg
+        # Construir filtros de audio profesionales
         filters = []
-        if normalize:
-            filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
-        if fade_in:
-            filters.append("afade=t=in:ss=0:d=2")
 
-        cmd = [str(FFMPEG_BIN), "-y", "-ss", str(start_time), "-i", str(temp_input)]
-        
-        if end_time and end_time.strip() and end_time != "0":
+        # 1. Ecualizador paramétrico de 3 bandas
+        if eq_bass != 0:
+            filters.append(f"equalizer=f=100:width_type=h:width=100:g={eq_bass}")
+        if eq_mid != 0:
+            filters.append(f"equalizer=f=1000:width_type=h:width=1000:g={eq_mid}")
+        if eq_treble != 0:
+            filters.append(f"equalizer=f=8000:width_type=h:width=3000:g={eq_treble}")
+
+        # 2. Ganancia de Volumen (dB)
+        if volume_gain != 0:
+            filters.append(f"volume={volume_gain}dB")
+
+        # 3. Velocidad / Pitch (atempo)
+        if speed != 1.0 and 0.5 <= speed <= 2.0:
+            filters.append(f"atempo={speed}")
+
+        # 4. Fade In
+        if fade_in_sec > 0:
+            filters.append(f"afade=t=in:ss=0:d={fade_in_sec}")
+
+        # 5. Fade Out
+        if fade_out_sec > 0 and end_time and end_time > start_time:
+            duration = (end_time - start_time) / (speed if speed > 0 else 1.0)
+            fade_start = max(0.0, duration - fade_out_sec)
+            filters.append(f"afade=t=out:st={fade_start}:d={fade_out_sec}")
+
+        # 6. Efecto Reverse
+        if reverse:
+            filters.append("areverse")
+
+        # 7. Normalización Profesional EBU R128 (-14 LUFS Spotify)
+        if normalize:
+            filters.append("loudnorm=I=-14:TP=-1.5:LRA=11")
+
+        # Formato de exportación
+        export_ext = export_format.lower()
+        if export_ext not in ["mp3", "wav", "flac", "m4a", "ogg"]:
+            export_ext = "mp3"
+
+        out_name = f"master_{safe_id}.{export_ext}"
+        temp_output = OUTPUT_DIR / out_name
+
+        cmd = [str(FFMPEG_BIN), "-y"]
+        if start_time > 0:
+            cmd.extend(["-ss", str(start_time)])
+
+        cmd.extend(["-i", str(temp_input)])
+
+        if end_time and end_time > start_time:
             cmd.extend(["-to", str(end_time)])
 
         if filters:
             cmd.extend(["-af", ",".join(filters)])
 
-        cmd.extend(["-c:a", "libmp3lame", "-b:a", "320k", str(temp_output)])
+        # Codecs según formato de alta fidelidad
+        if export_ext == "mp3":
+            cmd.extend(["-c:a", "libmp3lame", "-b:a", "320k"])
+        elif export_ext == "wav":
+            cmd.extend(["-c:a", "pcm_s24le"])
+        elif export_ext == "flac":
+            cmd.extend(["-c:a", "flac"])
+        elif export_ext == "m4a":
+            cmd.extend(["-c:a", "aac", "-b:a", "320k"])
+        elif export_ext == "ogg":
+            cmd.extend(["-c:a", "libvorbis", "-q:a", "7"])
 
-        process = subprocess.run(cmd, capture_output=True, text=True)
-        
+        cmd.append(str(temp_output))
+
+        env = os.environ.copy()
+        env["PATH"] = f"{BASE_DIR}{os.pathsep}{env.get('PATH', '')}"
+
+        process = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if process.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"FFmpeg error: {process.stderr}")
+            raise HTTPException(status_code=500, detail=f"Error en masterización: {process.stderr}")
 
-        return FileResponse(
-            path=str(temp_output),
-            media_type="audio/mpeg",
-            filename=f"luap_editado_{file.filename}"
-        )
+        original_stem = Path(file.filename).stem
+        final_filename = f"{original_stem}_master.{export_ext}"
+
+        return {
+            "success": True,
+            "message": "Masterización completada con éxito",
+            "filename": final_filename,
+            "stream_url": f"/static/output/{out_name}",
+            "download_url": f"/api/download-file/{out_name}"
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if temp_input.exists():
+        if temp_input and temp_input.exists():
             temp_input.unlink(missing_ok=True)
+
+
+@app.post("/api/mixdown")
+async def multitrack_mixdown(
+    files: List[UploadFile] = File(...),
+    configs: str = Form("[]"),
+    master_gain: float = Form(0.0),
+    normalize: bool = Form(False),
+    export_format: str = Form("mp3")
+):
+    temp_files = []
+    try:
+        import json
+        track_configs = json.loads(configs)
+        safe_id = uuid.uuid4().hex[:8]
+
+        cmd = [str(FFMPEG_BIN), "-y"]
+        filter_complex_parts = []
+
+        for idx, upload_file in enumerate(files):
+            ext = Path(upload_file.filename).suffix or ".mp3"
+            t_path = DOWNLOADS_DIR / f"multi_{safe_id}_{idx}{ext}"
+            temp_files.append(t_path)
+
+            with open(t_path, "wb") as buffer:
+                shutil.copyfileobj(upload_file.file, buffer)
+
+            cmd.extend(["-i", str(t_path)])
+
+            cfg = track_configs[idx] if idx < len(track_configs) else {}
+            vol = float(cfg.get("volume", 1.0))
+            offset_ms = int(float(cfg.get("offset", 0.0)) * 1000)
+            
+            track_filters = []
+            if offset_ms > 0:
+                track_filters.append(f"adelay={offset_ms}|{offset_ms}")
+            if vol != 1.0:
+                track_filters.append(f"volume={vol}")
+
+            filt_str = ",".join(track_filters) if track_filters else "anull"
+            filter_complex_parts.append(f"[{idx}:a]{filt_str}[a{idx}]")
+
+        inputs_count = len(files)
+        amix_inputs = "".join([f"[a{i}]" for i in range(inputs_count)])
+        mix_filter = f"{amix_inputs}amix=inputs={inputs_count}:duration=longest:dropout_transition=0"
+
+        master_filters = []
+        if master_gain != 0:
+            master_filters.append(f"volume={master_gain}dB")
+        if normalize:
+            master_filters.append("loudnorm=I=-14:TP=-1.5:LRA=11")
+
+        if master_filters:
+            mix_filter += f",{','.join(master_filters)}"
+
+        mix_filter += "[out]"
+        full_filter_complex = ";".join(filter_complex_parts) + ";" + mix_filter
+
+        cmd.extend(["-filter_complex", full_filter_complex, "-map", "[out]"])
+
+        export_ext = export_format.lower()
+        if export_ext not in ["mp3", "wav", "flac", "m4a", "ogg"]:
+            export_ext = "mp3"
+
+        out_name = f"multitrack_{safe_id}.{export_ext}"
+        temp_output = OUTPUT_DIR / out_name
+
+        if export_ext == "mp3":
+            cmd.extend(["-c:a", "libmp3lame", "-b:a", "320k"])
+        elif export_ext == "wav":
+            cmd.extend(["-c:a", "pcm_s24le"])
+        elif export_ext == "flac":
+            cmd.extend(["-c:a", "flac"])
+        elif export_ext == "m4a":
+            cmd.extend(["-c:a", "aac", "-b:a", "320k"])
+        elif export_ext == "ogg":
+            cmd.extend(["-c:a", "libvorbis", "-q:a", "7"])
+
+        cmd.append(str(temp_output))
+
+        env = os.environ.copy()
+        env["PATH"] = f"{BASE_DIR}{os.pathsep}{env.get('PATH', '')}"
+
+        process = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if process.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"Error en mezcla multitrack: {process.stderr}")
+
+        return {
+            "success": True,
+            "message": f"Mezcla de {inputs_count} pistas completada con éxito",
+            "filename": f"mezcla_master_{safe_id}.{export_ext}",
+            "stream_url": f"/static/output/{out_name}",
+            "download_url": f"/api/download-file/{out_name}"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        for t in temp_files:
+            if t.exists():
+                t.unlink(missing_ok=True)
+
+
 
 @app.post("/api/demucs")
 async def separate_tracks(file: UploadFile = File(...)):
