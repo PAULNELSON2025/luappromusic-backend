@@ -73,33 +73,68 @@ def serve_home():
 
 STATS_FILE = BASE_DIR / "stats.json"
 
-def get_visit_count():
+import time
+from datetime import date
+
+def get_stats_data():
+    today_str = str(date.today())
+    default_stats = {
+        "total_visits": 2450,
+        "unique_visitors": 1820,
+        "today_visits": 142,
+        "today_date": today_str,
+        "recent_hits": []
+    }
     try:
         if STATS_FILE.exists():
             with open(STATS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return data.get("visits", 1340)
+                if data.get("today_date") != today_str:
+                    data["today_date"] = today_str
+                    data["today_visits"] = 0
+                return data
     except Exception:
         pass
-    return 1340
+    return default_stats
 
-def increment_visit_count():
-    visits = get_visit_count() + 1
+def record_visitor(is_new_session: bool = True):
+    stats = get_stats_data()
+    stats["total_visits"] = stats.get("total_visits", 2450) + 1
+    stats["today_visits"] = stats.get("today_visits", 0) + 1
+    if is_new_session:
+        stats["unique_visitors"] = stats.get("unique_visitors", 1820) + 1
+
+    now = time.time()
+    # Mantener hits de los últimos 15 minutos para usuarios en línea
+    recent = stats.get("recent_hits", [])
+    recent = [t for t in recent if now - t < 900]
+    recent.append(now)
+    stats["recent_hits"] = recent
+
     try:
         with open(STATS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"visits": visits}, f)
+            json.dump(stats, f)
     except Exception:
         pass
-    return visits
+
+    online_count = max(3, len(recent) + 2) # Base activa en vivo
+    return {
+        "total_visits": stats["total_visits"],
+        "unique_visitors": stats["unique_visitors"],
+        "today_visits": stats["today_visits"],
+        "online_now": online_count,
+        "formatted_total": f"{stats['total_visits']:,}"
+    }
 
 @app.get("/api/health")
 def health_check():
     return {"status": "online", "message": "API activa", "author": "Paul Nelson Curasi"}
 
 @app.get("/api/visitors")
-def visitor_counter():
-    count = increment_visit_count()
-    return {"success": True, "visits": count, "formatted": f"{count:,}"}
+def visitor_counter(new_session: bool = False):
+    stats = record_visitor(is_new_session=new_session)
+    return {"success": True, **stats}
+
 
 
 @app.post("/api/download")
@@ -479,6 +514,136 @@ async def multitrack_mixdown(
         for t in temp_files:
             if t.exists():
                 t.unlink(missing_ok=True)
+
+
+@app.post("/api/master")
+async def master_audio_track(
+    file: UploadFile = File(...),
+    preset: str = Form("streaming"),
+    target_lufs: float = Form(-14.0),
+    sub_bass: float = Form(0.0),
+    warmth: float = Form(0.0),
+    presence: float = Form(0.0),
+    air_high: float = Form(0.0),
+    stereo_width: float = Form(1.2),
+    analog_warmth: bool = Form(True),
+    glue_comp: bool = Form(True),
+    export_format: str = Form("mp3")
+):
+    temp_input = None
+    try:
+        file_ext = Path(file.filename).suffix or ".mp3"
+        safe_id = uuid.uuid4().hex[:8]
+        temp_input = DOWNLOADS_DIR / f"raw_master_{safe_id}{file_ext}"
+
+        with open(temp_input, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Aplicar presets automáticos si se solicita
+        if preset == "club_bass":
+            sub_bass += 3.5
+            presence += 1.5
+            target_lufs = -11.0
+            stereo_width = 1.3
+        elif preset == "radio_hit":
+            warmth += 1.0
+            presence += 2.5
+            air_high += 3.0
+            target_lufs = -12.0
+            stereo_width = 1.25
+        elif preset == "acoustic_warm":
+            warmth += 2.0
+            air_high += 1.5
+            target_lufs = -16.0
+            stereo_width = 1.15
+        elif preset == "loud_heavy":
+            sub_bass += 2.0
+            presence += 2.0
+            target_lufs = -9.0
+            stereo_width = 1.35
+        elif preset == "streaming":
+            target_lufs = -14.0
+            stereo_width = 1.2
+
+        filters = []
+
+        # 1. Filtro Highpass de corte infrasónico (elimina ruidos por debajo de 28Hz para dar pegada)
+        filters.append("highpass=f=28")
+
+        # 2. Ecualización de Masterización Profesional
+        if sub_bass != 0:
+            filters.append(f"equalizer=f=60:width_type=q:width=1.2:g={sub_bass}")
+        if warmth != 0:
+            filters.append(f"equalizer=f=350:width_type=q:width=1.0:g={warmth}")
+        if presence != 0:
+            filters.append(f"equalizer=f=3500:width_type=q:width=1.2:g={presence}")
+        if air_high != 0:
+            filters.append(f"equalizer=f=12500:width_type=q:width=0.8:g={air_high}")
+
+        # 3. Saturación Analógica & Armónicos de Cinta (Tape Saturation)
+        if analog_warmth:
+            filters.append("aexciter=freq=4000:amount=1.5:drive=8.5")
+
+        # 4. Expansión de Campo Estéreo 3D (Stereo Widener)
+        if stereo_width > 1.0:
+            filters.append(f"extrastereo=m={stereo_width}")
+
+        # 5. Compresor Glue de Pegada Analógica
+        if glue_comp:
+            filters.append("acompressor=threshold=0.125:ratio=2.5:attack=15:release=120:makeup=1.2")
+
+        # 6. Limitador Brickwall & Maximización EBU R128
+        filters.append(f"loudnorm=I={target_lufs}:TP=-1.0:LRA=8")
+
+
+        export_ext = export_format.lower()
+        if export_ext not in ["mp3", "wav", "flac", "m4a"]:
+            export_ext = "mp3"
+
+        out_name = f"master_studio_{safe_id}.{export_ext}"
+        temp_output = OUTPUT_DIR / out_name
+
+        cmd = [str(FFMPEG_BIN), "-y", "-i", str(temp_input)]
+        if filters:
+            cmd.extend(["-af", ",".join(filters)])
+
+        if export_ext == "mp3":
+            cmd.extend(["-c:a", "libmp3lame", "-b:a", "320k"])
+        elif export_ext == "wav":
+            cmd.extend(["-c:a", "pcm_s24le"])
+        elif export_ext == "flac":
+            cmd.extend(["-c:a", "flac"])
+        elif export_ext == "m4a":
+            cmd.extend(["-c:a", "aac", "-b:a", "320k"])
+
+        cmd.append(str(temp_output))
+
+        env = os.environ.copy()
+        env["PATH"] = f"{BASE_DIR}{os.pathsep}{env.get('PATH', '')}"
+
+        process = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if process.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"Error en motor de masterización: {process.stderr}")
+
+        original_stem = Path(file.filename).stem
+        final_filename = f"{original_stem}_MASTER_PRO.{export_ext}"
+
+        return {
+            "success": True,
+            "message": "Pista masterizada con éxito con motor analógico de alta fidelidad",
+            "filename": final_filename,
+            "preset_applied": preset.upper(),
+            "target_lufs": target_lufs,
+            "stream_url": f"/static/output/{out_name}",
+            "download_url": f"/api/download-file/{out_name}"
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if temp_input and temp_input.exists():
+            temp_input.unlink(missing_ok=True)
+
 
 
 
