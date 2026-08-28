@@ -81,26 +81,32 @@ async def download_media(req: DownloadRequest):
     is_instagram = "instagram.com" in url.lower()
     is_facebook = "facebook.com" in url.lower() or "fb.watch" in url.lower()
 
+    cookies_file = BASE_DIR / "cookies.txt"
+    cookie_path = str(cookies_file) if cookies_file.exists() else None
+
     ydl_opts = {
         'outtmpl': out_template,
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'geo_bypass': True,
+        'cookiefile': cookie_path,
         'ffmpeg_location': FFMPEG_BIN if os.path.exists(str(FFMPEG_BIN)) else None,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'tv_embedded', 'web_creator'],
+                'player_client': ['android'],
+                'player_skip': ['webpage', 'configs'],
             }
         },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
             'Sec-Fetch-Mode': 'navigate',
         },
         'extract_flat': False,
     }
+
 
 
     if req.format in ["mp3", "wav"]:
