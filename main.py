@@ -146,6 +146,16 @@ async def download_media(req: DownloadRequest):
     file_id = str(uuid.uuid4())[:8]
     out_template = str(DOWNLOADS_DIR / f"%(title)s_{file_id}.%(ext)s")
 
+    # Resolver acortadores de URL comunes (fb.watch, vt.tiktok.com, vm.tiktok.com, youtu.be)
+    if "fb.watch" in url.lower() or "vt.tiktok.com" in url.lower() or "vm.tiktok.com" in url.lower():
+        try:
+            import requests
+            resp = requests.head(url, allow_redirects=True, timeout=5, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36'})
+            if resp.url and resp.url != url:
+                url = resp.url
+        except Exception:
+            pass
+
     # Detectar plataforma
     is_youtube = "youtube.com" in url.lower() or "youtu.be" in url.lower()
     is_tiktok = "tiktok.com" in url.lower()
@@ -161,6 +171,8 @@ async def download_media(req: DownloadRequest):
         'no_warnings': True,
         'noplaylist': True,
         'geo_bypass': True,
+        'restrictfilenames': True,
+        'windowsfilenames': True,
         'cookiefile': cookie_path,
         'ffmpeg_location': FFMPEG_BIN if os.path.exists(str(FFMPEG_BIN)) else None,
         'extract_flat': False,
@@ -185,6 +197,25 @@ async def download_media(req: DownloadRequest):
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
             'Referer': 'https://www.tiktok.com/',
+        }
+    elif is_facebook:
+        ydl_opts['http_headers'] = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+            'Sec-Fetch-Mode': 'navigate',
+        }
+    elif is_instagram:
+        ydl_opts['http_headers'] = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.instagram.com/',
+        }
+        ydl_opts['extractor_args'] = {
+            'instagram': {
+                'api': ['web'],
+            }
         }
 
 
@@ -237,8 +268,8 @@ async def download_media(req: DownloadRequest):
             if 'entries' in info and info['entries']:
                 info = info['entries'][0]
 
-            title = info.get('title') or info.get('description') or 'multimedia_descargado'
-            title = "".join([c for c in title if c.isalnum() or c in (' ', '-', '_', '.')]).rstrip()[:80]
+            raw_title = info.get('title') or info.get('description') or 'multimedia_descargado'
+            clean_title = "".join([c for c in raw_title if c.isalnum() or c in (' ', '-', '_', '.')]).rstrip()[:80]
             
             matched_files = list(DOWNLOADS_DIR.glob(f"*{file_id}*"))
             if not matched_files:
@@ -257,7 +288,7 @@ async def download_media(req: DownloadRequest):
 
             return {
                 "success": True,
-                "title": title,
+                "title": clean_title or final_file.name,
                 "platform": platform_detected,
                 "filename": final_file.name,
                 "download_url": f"/api/download-file/{final_file.name}",
@@ -269,31 +300,80 @@ async def download_media(req: DownloadRequest):
 
     except Exception as e:
         error_msg = str(e)
-        if "Unsupported URL" in error_msg:
-            raise HTTPException(status_code=400, detail="El enlace ingresado no es compatible o no contiene audio/video público.")
+        if "login required" in error_msg.lower() or "empty media response" in error_msg.lower():
+            raise HTTPException(status_code=400, detail="El enlace solicitado es privado o requiere inicio de sesión en Instagram/Facebook para acceder.")
+        elif "unsupported url" in error_msg.lower():
+            raise HTTPException(status_code=400, detail="El enlace ingresado no es compatible o no contiene un video/audio público.")
         raise HTTPException(status_code=500, detail=f"Error al procesar descarga: {error_msg}")
+
 
 @app.get("/api/download-file/{filepath:path}")
 async def get_download_file(filepath: str):
+    import urllib.parse
+    import re
+    import time
+    
+    unquoted_path = urllib.parse.unquote(filepath)
+    raw_path = filepath
+    
+    file_path = None
+    # 1. Búsqueda directa con decodificación de caracteres especiales
+    for candidate_name in [unquoted_path, raw_path, Path(unquoted_path).name, Path(raw_path).name]:
+        for base_dir in [DOWNLOADS_DIR, OUTPUT_DIR, BASE_DIR]:
+            p = base_dir / candidate_name
+            if p.exists() and p.is_file():
+                file_path = p
+                break
+        if file_path:
+            break
 
-    file_path = DOWNLOADS_DIR / filepath
-    if not file_path.exists():
-        file_path = OUTPUT_DIR / filepath
-    if not file_path.exists():
+    # 2. Búsqueda recursiva por nombre exacto o coincidencia de ID
+    if not file_path:
+        target_name = Path(unquoted_path).name
+        for base_dir in [DOWNLOADS_DIR, OUTPUT_DIR]:
+            matches = list(base_dir.rglob(target_name))
+            if matches:
+                file_path = matches[0]
+                break
+        
+        # 3. Búsqueda por ID parcial (_xxxxxxxx)
+        if not file_path:
+            stem = Path(target_name).stem
+            if "_" in stem:
+                suffix_id = stem.split("_")[-1]
+                for base_dir in [DOWNLOADS_DIR, OUTPUT_DIR]:
+                    matches = list(base_dir.rglob(f"*{suffix_id}*"))
+                    if matches:
+                        file_path = matches[0]
+                        break
+
+        # 4. Búsqueda por prefijo del título (sin extensión)
+        if not file_path:
+            stem_clean = "".join([c for c in Path(target_name).stem if c.isalnum() or c in (' ', '-', '_')]).strip()[:30]
+            if stem_clean:
+                for base_dir in [DOWNLOADS_DIR, OUTPUT_DIR]:
+                    matches = list(base_dir.rglob(f"*{stem_clean}*"))
+                    if matches:
+                        file_path = matches[0]
+                        break
+
+        # 5. Fallback al archivo descargado más reciente si fue en los últimos 5 minutos
+        if not file_path:
+            recent_files = sorted(DOWNLOADS_DIR.glob("*.*"), key=os.path.getmtime, reverse=True)
+            if recent_files and (time.time() - os.path.getmtime(recent_files[0])) < 300:
+                file_path = recent_files[0]
+
+    if not file_path or not file_path.exists():
         raise HTTPException(status_code=404, detail="El archivo solicitado ya no existe o caducó.")
 
-    import re
-    import urllib.parse
-    
     filename = file_path.name
-    # Sanitizar nombre ASCII puro para compatibilidad con cabeceras HTTP latin-1
+    # Sanitizar nombre ASCII puro para cabecera HTTP estándar
     safe_ascii_name = re.sub(r'[^\x20-\x7E]', '_', filename)
     if not safe_ascii_name.strip() or safe_ascii_name == "_.mp3":
         safe_ascii_name = f"audio_luap_{filename[-8:]}"
 
     encoded_filename = urllib.parse.quote(filename)
 
-    # application/octet-stream fuerza el diálogo de guardar archivo
     return FileResponse(
         path=str(file_path),
         media_type="application/octet-stream",
@@ -303,6 +383,8 @@ async def get_download_file(filepath: str):
             "Access-Control-Expose-Headers": "Content-Disposition"
         }
     )
+
+
 
 
 @app.post("/api/edit")
