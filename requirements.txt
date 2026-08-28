@@ -5,3 +5,6 @@ yt-dlp
 pydantic
 requests
 imageio-ffmpeg
+static-ffmpeg
+demucs
+

@@ -20,6 +20,13 @@ OUTPUT_DIR = BASE_DIR / "output"
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# Inicializar rutas de FFmpeg y FFprobe de manera universal
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except Exception:
+    pass
+
 # Detectar ruta de ffmpeg de manera universal (Render Linux / Windows)
 try:
     import imageio_ffmpeg
@@ -27,6 +34,7 @@ try:
 except Exception:
     local_ffmpeg = BASE_DIR / "ffmpeg.exe"
     FFMPEG_BIN = str(local_ffmpeg) if local_ffmpeg.exists() else "ffmpeg"
+
 
 
 app = FastAPI(title="LUAP PRO MUSIC API", version="2.0.0")
@@ -46,7 +54,8 @@ app.mount("/static/output", StaticFiles(directory=str(OUTPUT_DIR)), name="output
 
 class DownloadRequest(BaseModel):
     url: str
-    format: str = "mp3" # mp3, wav, mp4
+    media_type: str = "audio" # audio o video
+    format: str = "mp3_320" # mp3_320, mp3_192, wav, m4a, flac, ogg, mp4_1080, mp4_720, mp4_480, webm, mkv
     normalize: bool = False
     trim_silence: bool = False
 
@@ -62,9 +71,35 @@ def serve_home():
         "message": "Servidor activo y listo para procesar audio y video."
     }
 
+STATS_FILE = BASE_DIR / "stats.json"
+
+def get_visit_count():
+    try:
+        if STATS_FILE.exists():
+            with open(STATS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("visits", 1340)
+    except Exception:
+        pass
+    return 1340
+
+def increment_visit_count():
+    visits = get_visit_count() + 1
+    try:
+        with open(STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"visits": visits}, f)
+    except Exception:
+        pass
+    return visits
+
 @app.get("/api/health")
 def health_check():
-    return {"status": "online", "message": "API activa"}
+    return {"status": "online", "message": "API activa", "author": "Paul Nelson Curasi"}
+
+@app.get("/api/visitors")
+def visitor_counter():
+    count = increment_visit_count()
+    return {"success": True, "visits": count, "formatted": f"{count:,}"}
 
 
 @app.post("/api/download")
@@ -76,7 +111,7 @@ async def download_media(req: DownloadRequest):
     file_id = str(uuid.uuid4())[:8]
     out_template = str(DOWNLOADS_DIR / f"%(title)s_{file_id}.%(ext)s")
 
-    # Detectar plataforma para optimizar parámetros
+    # Detectar plataforma
     is_tiktok = "tiktok.com" in url.lower()
     is_instagram = "instagram.com" in url.lower()
     is_facebook = "facebook.com" in url.lower() or "fb.watch" in url.lower()
@@ -107,19 +142,45 @@ async def download_media(req: DownloadRequest):
         'extract_flat': False,
     }
 
+    # Configuración de Formatos de Audio y Video
+    fmt = req.format.lower()
 
-
-    if req.format in ["mp3", "wav"]:
-        # Para TikTok e Instagram, buscar cualquier stream de audio o extraer del video
+    # --- FORMATOS DE AUDIO ---
+    if fmt == "mp3_320" or fmt == "mp3":
         ydl_opts['format'] = 'bestaudio/best'
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': req.format,
-            'preferredquality': '320' if req.format == 'mp3' else None,
-        }]
+        ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}]
+    elif fmt == "mp3_192":
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
+    elif fmt == "wav":
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'wav'}]
+    elif fmt == "m4a" or fmt == "aac":
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'm4a'}]
+    elif fmt == "flac":
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'flac'}]
+    elif fmt == "ogg":
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'vorbis'}]
+
+    # --- FORMATOS DE VIDEO ---
+    elif fmt == "mp4_1080":
+        ydl_opts['format'] = 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]/best'
+    elif fmt == "mp4_720":
+        ydl_opts['format'] = 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best'
+    elif fmt == "mp4_480" or fmt == "mp4":
+        ydl_opts['format'] = 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]/best'
+    elif fmt == "webm":
+        ydl_opts['format'] = 'bestvideo[ext=webm]+bestaudio[ext=webm]/best[ext=webm]/best'
+    elif fmt == "mkv":
+        ydl_opts['format'] = 'bestvideo+bestaudio/best'
+        ydl_opts['merge_output_format'] = 'mkv'
     else:
-        # Video MP4
-        ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+        # Por defecto MP3
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '320'}]
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -127,18 +188,14 @@ async def download_media(req: DownloadRequest):
             if not info:
                 raise HTTPException(status_code=400, detail="No se pudo obtener información del enlace multimedia.")
 
-            # Manejar listas o entradas únicas
             if 'entries' in info and info['entries']:
                 info = info['entries'][0]
 
             title = info.get('title') or info.get('description') or 'multimedia_descargado'
-            # Limpiar caracteres especiales del título
             title = "".join([c for c in title if c.isalnum() or c in (' ', '-', '_', '.')]).rstrip()[:80]
             
-            # Buscar el archivo generado en downloads
             matched_files = list(DOWNLOADS_DIR.glob(f"*{file_id}*"))
             if not matched_files:
-                # Búsqueda fallback
                 matched_files = sorted(DOWNLOADS_DIR.glob("*.*"), key=os.path.getmtime, reverse=True)
                 if not matched_files:
                     raise HTTPException(status_code=500, detail="El archivo se procesó pero no se pudo localizar en el almacenamiento.")
@@ -146,7 +203,6 @@ async def download_media(req: DownloadRequest):
             final_file = matched_files[0]
             relative_url = f"/static/downloads/{final_file.name}"
 
-            # Detectar red social de origen
             platform_detected = "YouTube"
             if is_tiktok: platform_detected = "TikTok"
             elif is_instagram: platform_detected = "Instagram"
@@ -161,6 +217,7 @@ async def download_media(req: DownloadRequest):
                 "download_url": f"/api/download-file/{final_file.name}",
                 "stream_url": relative_url,
                 "duration": info.get("duration", 0),
+                "format_selected": fmt.upper(),
                 "uploader": info.get("uploader") or info.get("creator") or platform_detected
             }
 
@@ -170,25 +227,35 @@ async def download_media(req: DownloadRequest):
             raise HTTPException(status_code=400, detail="El enlace ingresado no es compatible o no contiene audio/video público.")
         raise HTTPException(status_code=500, detail=f"Error al procesar descarga: {error_msg}")
 
-@app.get("/api/download-file/{filename}")
-async def get_download_file(filename: str):
-    file_path = DOWNLOADS_DIR / filename
+@app.get("/api/download-file/{filepath:path}")
+async def get_download_file(filepath: str):
+
+    file_path = DOWNLOADS_DIR / filepath
     if not file_path.exists():
-        file_path = OUTPUT_DIR / filename
+        file_path = OUTPUT_DIR / filepath
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="El archivo solicitado ya no existe o caducó.")
 
-    media_type = "audio/mpeg"
-    if filename.endswith(".mp4"):
-        media_type = "video/mp4"
-    elif filename.endswith(".wav"):
-        media_type = "audio/wav"
+    import re
+    import urllib.parse
+    
+    filename = file_path.name
+    # Sanitizar nombre ASCII puro para compatibilidad con cabeceras HTTP latin-1
+    safe_ascii_name = re.sub(r'[^\x20-\x7E]', '_', filename)
+    if not safe_ascii_name.strip() or safe_ascii_name == "_.mp3":
+        safe_ascii_name = f"audio_luap_{filename[-8:]}"
 
+    encoded_filename = urllib.parse.quote(filename)
+
+    # application/octet-stream fuerza el diálogo de guardar archivo
     return FileResponse(
         path=str(file_path),
-        media_type=media_type,
-        filename=filename,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+        media_type="application/octet-stream",
+        filename=safe_ascii_name,
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_ascii_name}"; filename*=UTF-8\'\'{encoded_filename}',
+            "Access-Control-Expose-Headers": "Content-Disposition"
+        }
     )
 
 
@@ -246,40 +313,63 @@ async def edit_audio(
 
 @app.post("/api/demucs")
 async def separate_tracks(file: UploadFile = File(...)):
+    temp_input = None
     try:
-        temp_input = DOWNLOADS_DIR / f"demucs_{uuid.uuid4().hex[:8]}_{file.filename}"
+        ext = Path(file.filename).suffix or ".mp3"
+        safe_base = f"track_{uuid.uuid4().hex[:8]}"
+        temp_input = DOWNLOADS_DIR / f"{safe_base}{ext}"
+        
         with open(temp_input, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Ejecutar Demucs
+        # Ejecutar Demucs con salida directa en MP3 de 320 kbps
         cmd = [
             sys.executable, "-m", "demucs",
+            "--mp3",
+            "--mp3-bitrate", "320",
             "--two-stems", "vocals",
             "-o", str(OUTPUT_DIR),
             str(temp_input)
         ]
         
-        process = subprocess.run(cmd, capture_output=True, text=True)
+        env = os.environ.copy()
+        env["PATH"] = f"{BASE_DIR}{os.pathsep}{env.get('PATH', '')}"
+
+        process = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if process.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"Demucs error: {process.stderr}")
+            raise HTTPException(status_code=500, detail=f"Demucs error: {process.stderr or process.stdout}")
 
-        track_name = Path(temp_input).stem
-        demucs_out = OUTPUT_DIR / "htdemucs" / track_name
+        track_folder = safe_base
+        demucs_out = OUTPUT_DIR / "htdemucs" / track_folder
 
-        vocals_path = demucs_out / "vocals.wav"
-        no_vocals_path = demucs_out / "no_vocals.wav"
+        vocals_file = demucs_out / "vocals.mp3"
+        if not vocals_file.exists():
+            vocals_file = demucs_out / "vocals.wav"
+
+        no_vocals_file = demucs_out / "no_vocals.mp3"
+        if not no_vocals_file.exists():
+            no_vocals_file = demucs_out / "no_vocals.wav"
+
+        original_stem = Path(file.filename).stem
 
         return {
             "success": True,
-            "message": "Pistas separadas con éxito",
-            "vocals_url": f"/static/output/htdemucs/{track_name}/vocals.wav" if vocals_path.exists() else None,
-            "instrumental_url": f"/static/output/htdemucs/{track_name}/no_vocals.wav" if no_vocals_path.exists() else None
+            "message": "Separación por IA completada con éxito",
+            "track_name": original_stem,
+            "vocals_stream": f"/static/output/htdemucs/{track_folder}/{vocals_file.name}",
+            "vocals_download": f"/api/download-file/htdemucs/{track_folder}/{vocals_file.name}",
+            "instrumental_stream": f"/static/output/htdemucs/{track_folder}/{no_vocals_file.name}",
+            "instrumental_download": f"/api/download-file/htdemucs/{track_folder}/{no_vocals_file.name}"
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if temp_input and temp_input.exists():
+            temp_input.unlink(missing_ok=True)
 
 # Servir Frontend Web Estático directamente en la raíz
+
 FRONTEND_DIR = BASE_DIR.parent / "frontend"
 if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend_app")
