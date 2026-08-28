@@ -51,13 +51,21 @@ class DownloadRequest(BaseModel):
     trim_silence: bool = False
 
 @app.get("/")
-def health_check():
+def serve_home():
+    index_file = BASE_DIR.parent / "frontend" / "index.html"
+    if index_file.exists():
+        return FileResponse(str(index_file))
     return {
         "status": "online",
         "service": "LUAP PRO MUSIC API",
         "version": "2.0.0",
         "message": "Servidor activo y listo para procesar audio y video."
     }
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "online", "message": "API activa"}
+
 
 @app.post("/api/download")
 async def download_media(req: DownloadRequest):
@@ -258,6 +266,12 @@ async def separate_tracks(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Servir Frontend Web Estático directamente en la raíz
+FRONTEND_DIR = BASE_DIR.parent / "frontend"
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend_app")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
