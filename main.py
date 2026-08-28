@@ -147,6 +147,7 @@ async def download_media(req: DownloadRequest):
     out_template = str(DOWNLOADS_DIR / f"%(title)s_{file_id}.%(ext)s")
 
     # Detectar plataforma
+    is_youtube = "youtube.com" in url.lower() or "youtu.be" in url.lower()
     is_tiktok = "tiktok.com" in url.lower()
     is_instagram = "instagram.com" in url.lower()
     is_facebook = "facebook.com" in url.lower() or "fb.watch" in url.lower()
@@ -162,20 +163,30 @@ async def download_media(req: DownloadRequest):
         'geo_bypass': True,
         'cookiefile': cookie_path,
         'ffmpeg_location': FFMPEG_BIN if os.path.exists(str(FFMPEG_BIN)) else None,
-        'extractor_args': {
+        'extract_flat': False,
+    }
+
+    if is_youtube:
+        ydl_opts['extractor_args'] = {
             'youtube': {
                 'player_client': ['android'],
                 'player_skip': ['webpage', 'configs'],
             }
-        },
-        'http_headers': {
+        }
+        ydl_opts['http_headers'] = {
             'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
             'Sec-Fetch-Mode': 'navigate',
-        },
-        'extract_flat': False,
-    }
+        }
+    elif is_tiktok:
+        ydl_opts['http_headers'] = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.tiktok.com/',
+        }
+
 
     # Configuración de Formatos de Audio y Video
     fmt = req.format.lower()
